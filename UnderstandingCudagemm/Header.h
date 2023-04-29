@@ -57,6 +57,11 @@ __global__ void matrixMul_naive(uint32_t hA, uint32_t wA, uint32_t wB, const flo
     C[y * wB + x] = tmp;
 }
 
+void matrixMulNaive(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    matrixMul_naive <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+}
+
 __global__ void matrixMul_tiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
     const uint32_t blockedX = blockIdx.x << 5;
@@ -93,4 +98,9 @@ __global__ void matrixMul_tiling(uint32_t hA, uint32_t wA, uint32_t wB, const fl
     }
 
     C[wB * y + x] = sum;
+}
+
+void matrixMulTiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    matrixMul_tiling <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
 }

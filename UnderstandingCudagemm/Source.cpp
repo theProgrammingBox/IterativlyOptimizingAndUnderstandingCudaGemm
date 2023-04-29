@@ -34,7 +34,7 @@ int main() {
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0);
 
-    matrixMul_tiling <<<dim3((N >> 5) + (N & 0x1f), (M >> 5) + (M & 0x1f)), dim3(32, 32)>>> (M, K, N, d_A, d_B, d_C);
+    matrixMulTiling(M, K, N, d_A, d_B, d_C);
 
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
