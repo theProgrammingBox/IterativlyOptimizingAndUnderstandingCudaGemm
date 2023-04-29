@@ -104,3 +104,46 @@ void matrixMulTiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, cons
 {
     matrixMul_tiling <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
 }
+
+__global__ void matrixMul_tiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    const uint32_t blockedX = blockIdx.x << 5;
+    const uint32_t blockedY = blockIdx.y << 5;
+    const uint32_t x = blockedX + threadIdx.x;
+    const uint32_t y = blockedY + threadIdx.y;
+
+    /*if (x >= wB || y >= hA)
+        return;*/
+
+    __shared__ float sA[1024];
+    __shared__ float sB[1024];
+
+    const uint32_t scaledY32 = threadIdx.y << 5;
+    const uint32_t scaledwB32 = wB << 5;
+
+    float* sharedA = sA + scaledY32 + threadIdx.x;
+    float* sharedB = sB + scaledY32 + threadIdx.x;
+
+    A += threadIdx.x + threadIdx.y * wA + blockedY * wA;
+    B += threadIdx.x + threadIdx.y * wB + blockedX;
+    C += y * wB + x;
+
+    float sum = 0.0;
+    for (uint32_t blockIdx = 0; blockIdx < wA; blockIdx += 32, A += 32, B += scaledwB32)
+    {
+		*sharedA = *A;
+		*sharedB = *B;
+		__syncthreads();
+
+		for (uint32_t k = 0; k < 32; ++k)
+			sum += sA[scaledY32 + k] * sB[(k << 5) + threadIdx.x];
+		__syncthreads();
+	}
+
+    *C = sum;
+}
+
+void matrixMulTiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+	matrixMul_tiling2 <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+}
