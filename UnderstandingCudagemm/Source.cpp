@@ -34,7 +34,7 @@ int main() {
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0);
 
-    matrixMulTiling2(M, K, N, d_A, d_B, d_C);
+    matrixMul1DBlocktiling(M, K, N, d_A, d_B, d_C);
 
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);

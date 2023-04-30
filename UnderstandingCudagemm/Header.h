@@ -1,9 +1,9 @@
 #pragma once
 #include <iostream>
+#include <assert.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <curand.h>
-
 
 void PrintGPUMatrix(float* d_arr, uint32_t rows, uint32_t cols, const char* label) {
     float* h_arr = (float*)malloc(rows * cols * sizeof(float));
@@ -59,7 +59,7 @@ __global__ void matrixMul_naive(uint32_t hA, uint32_t wA, uint32_t wB, const flo
 
 void matrixMulNaive(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
-    matrixMul_naive <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+    matrixMul_naive <<<dim3((wB >> 5) + bool(wB & 0x1f), (hA >> 5) + bool(hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
 }
 
 __global__ void matrixMul_tiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
@@ -102,7 +102,7 @@ __global__ void matrixMul_tiling(uint32_t hA, uint32_t wA, uint32_t wB, const fl
 
 void matrixMulTiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
-    matrixMul_tiling <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+    matrixMul_tiling <<<dim3((wB >> 5) + bool(wB & 0x1f), (hA >> 5) + bool(hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
 }
 
 __global__ void matrixMul_tiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
@@ -112,8 +112,8 @@ __global__ void matrixMul_tiling2(uint32_t hA, uint32_t wA, uint32_t wB, const f
     const uint32_t x = blockedX + threadIdx.x;
     const uint32_t y = blockedY + threadIdx.y;
 
-    /*if (x >= wB || y >= hA)
-        return;*/
+    if (x >= wB || y >= hA)
+        return;
 
     __shared__ float sA[1024];
     __shared__ float sB[1024];
@@ -145,5 +145,64 @@ __global__ void matrixMul_tiling2(uint32_t hA, uint32_t wA, uint32_t wB, const f
 
 void matrixMulTiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
-	matrixMul_tiling2 <<<dim3((wB >> 5) + (wB & 0x1f), (hA >> 5) + (hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+	matrixMul_tiling2 <<<dim3((wB >> 5) + bool(wB & 0x1f), (hA >> 5) + bool(hA & 0x1f)), dim3(32, 32)>>> (hA, wA, wB, A, B, C);
+}
+
+__global__ void sgemm1DBlocktiling(int M, int N, int K, const float* A, const float* B, float* C) {
+
+    const uint BM = 64;
+    const uint BN = 64;
+    const uint BK = 8;
+    const uint TM = 8;
+
+    const uint cRow = blockIdx.y;
+    const uint cCol = blockIdx.x;
+
+    // each warp will calculate 32*TM elements, with 32 being the columnar dim.
+    const int threadCol = threadIdx.x % BN;
+    const int threadRow = threadIdx.x / BN;
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
+    float threadResults[TM] = { 0.0 };
+
+    assert(BM * BK == blockDim.x);
+    assert(BN * BK == blockDim.x);
+    const uint innerColA = threadIdx.x % BK; // warp-level GMEM coalescing
+    const uint innerRowA = threadIdx.x / BK;
+    const uint innerColB = threadIdx.x % BN; // warp-level GMEM coalescing
+    const uint innerRowB = threadIdx.x / BN;
+
+    float* sharedA = As + innerRowA * BK + innerColA;
+    float* sharedB = Bs + innerRowB * BN + innerColB;
+
+    A += innerColA + innerRowA * K + cRow * BM * K;
+    B += innerColB + innerRowB * N + cCol * BN;
+    C += cRow * BM * N + cCol * BN;
+
+    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK, A += BK, B += BK * N) {
+        *sharedA = *A;
+        *sharedB = *B;
+        __syncthreads();
+
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+            // we make the dotproduct loop the outside loop, which facilitates
+            // reuse of the Bs entry, which we can cache in a tmp var.
+            float tmpB = Bs[dotIdx * BN + threadCol];
+            for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+                threadResults[resIdx] +=
+                    As[(threadRow * TM + resIdx) * BK + dotIdx] * tmpB;
+            }
+        }
+        __syncthreads();
+    }
+
+    for (uint resIdx = 0; resIdx < TM; ++resIdx) {
+        C[(threadRow * TM + resIdx) * N + threadCol] = threadResults[resIdx];
+    }
+}
+
+void matrixMul1DBlocktiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    sgemm1DBlocktiling<<<dim3((wB >> 6) + bool(wB & 0x3f), (hA >> 6) + bool(hA & 0x3f)), 512 >> > (hA, wB, wA, A, B, C);
 }
