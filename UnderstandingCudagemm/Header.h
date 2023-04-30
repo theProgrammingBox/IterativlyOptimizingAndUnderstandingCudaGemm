@@ -205,3 +205,50 @@ void matrixMul1DBlocktiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* 
 {
     sgemm1DBlocktiling<<<dim3((wB >> 6) + bool(wB & 0x3f), (hA >> 6) + bool(hA & 0x3f)), 512 >> > (hA, wB, wA, A, B, C);
 }
+
+__global__ void sgemm1DBlocktiling2(int M, int N, int K, const float* A, const float* B, float* C)
+{
+    const uint blockedX = blockIdx.x << 6;
+    const uint blockedY = blockIdx.y << 6;
+
+    __shared__ float As[1024];
+    __shared__ float Bs[1024];
+    float threadResults[4] = { 0.0 };
+
+    const uint threadxForA = threadIdx.x & 0xf;  // 0 - 7
+    const uint threadyForA = threadIdx.x >> 4;  // 0 - 63
+
+    const uint threadxForB = threadIdx.x & 0x3F;  // 0 - 63
+    const uint threadyForB = threadIdx.x >> 6;  // 0 - 7
+
+    float* sharedA = As + threadIdx.x;
+    float* sharedB = Bs + threadIdx.x;
+
+    // can use | instead of +
+    A += threadxForA + (threadyForA + blockedY) * K;
+    B += threadxForB + threadyForB * N + blockedX;
+    C += (blockedY + (threadyForB << 2)) * N + blockedX + threadxForB;
+
+    for (uint bkIdx = 0; bkIdx < K; bkIdx += 16, A += 16, B += N << 4)
+    {
+        *sharedA = *A;
+        *sharedB = *B;
+        __syncthreads();
+
+        for (uint dotIdx = 0; dotIdx < 16; ++dotIdx)
+        {
+            float tmpB = Bs[(dotIdx << 6) + threadxForB];
+            for (uint resIdx = 0; resIdx < 4; ++resIdx)
+                threadResults[resIdx] += As[(((threadyForB << 2) + resIdx) << 4) + dotIdx] * tmpB;
+        }
+        __syncthreads();
+    }
+
+    for (uint resIdx = 0; resIdx < 4; ++resIdx)
+        C[resIdx * N] = threadResults[resIdx];
+}
+
+void matrixMul1DBlocktiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+	sgemm1DBlocktiling2<<<dim3((wB >> 6) + bool(wB & 0x3f), (hA >> 6) + bool(hA & 0x3f)), 1024>>> (hA, wB, wA, A, B, C);
+}
