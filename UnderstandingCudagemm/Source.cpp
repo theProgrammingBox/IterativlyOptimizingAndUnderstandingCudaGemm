@@ -1,7 +1,7 @@
 ﻿#include "Header.cuh"
 
 int main() {
-    const int M = 2048, N = 1024, K = 512;
+    const int M = 4096, N = 2048, K = 1024;
     const float alpha = 1.0f, beta = 0.0f;
 
     // Initialize cuBLAS and cuRAND handles

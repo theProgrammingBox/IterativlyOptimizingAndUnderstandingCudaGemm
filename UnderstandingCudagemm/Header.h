@@ -5,6 +5,11 @@
 #include <cublas_v2.h>
 #include <curand.h>
 
+/*
+Important lesseons
+0. asserts can help compilers optimize
+*/
+
 void PrintGPUMatrix(float* d_arr, uint32_t rows, uint32_t cols, const char* label) {
     float* h_arr = (float*)malloc(rows * cols * sizeof(float));
     cudaMemcpy(h_arr, d_arr, rows * cols * sizeof(float), cudaMemcpyDeviceToHost);
@@ -155,49 +160,45 @@ __global__ void sgemm1DBlocktiling(int M, int N, int K, const float* A, const fl
     const uint BK = 8;
     const uint TM = 8;
 
-    const uint cRow = blockIdx.y;
-    const uint cCol = blockIdx.x;
-
-    // each warp will calculate 32*TM elements, with 32 being the columnar dim.
-    const int threadCol = threadIdx.x % BN;
-    const int threadRow = threadIdx.x / BN;
+    const uint blockedX = blockIdx.x * BN;
+    const uint blockedY = blockIdx.y * BM;
 
     __shared__ float As[512];
     __shared__ float Bs[512];
     float threadResults[TM] = { 0.0 };
 
+    const uint threadxForA = threadIdx.x % BK;  // 0 - 7
+    const uint threadyForA = threadIdx.x / BK;  // 0 - 63
+
+    const uint threadxForB = threadIdx.x % BN;  // 0 - 63
+    const uint threadyForB = threadIdx.x / BN;  // 0 - 7
+
+    float* sharedA = As + threadyForA * BK + threadxForA;
+    float* sharedB = Bs + threadyForB * BN + threadxForB;
+
+    A += threadxForA + threadyForA * K + blockedY * K;
+    B += threadxForB + threadyForB * N + blockedX;
+    C += blockedY * N + blockedX;
+
     assert(BM * BK == blockDim.x);
     assert(BN * BK == blockDim.x);
-    const uint innerColA = threadIdx.x % BK; // warp-level GMEM coalescing
-    const uint innerRowA = threadIdx.x / BK;
-
-    float* sharedA = As + innerRowA * BK + innerColA;
-    float* sharedB = Bs + threadRow * BN + threadCol;
-
-    A += innerColA + innerRowA * K + cRow * BM * K;
-    B += threadCol + threadRow * N + cCol * BN;
-    C += cRow * BM * N + cCol * BN;
-
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK, A += BK, B += BK * N) {
+    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK, A += BK, B += BK * N)
+    {
         *sharedA = *A;
         *sharedB = *B;
         __syncthreads();
 
-        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
-            // we make the dotproduct loop the outside loop, which facilitates
-            // reuse of the Bs entry, which we can cache in a tmp var.
-            float tmpB = Bs[dotIdx * BN + threadCol];
-            for (uint resIdx = 0; resIdx < TM; ++resIdx) {
-                threadResults[resIdx] +=
-                    As[(threadRow * TM + resIdx) * BK + dotIdx] * tmpB;
-            }
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
+        {
+            float tmpB = Bs[dotIdx * BN + threadxForB];
+            for (uint resIdx = 0; resIdx < TM; ++resIdx)
+                threadResults[resIdx] += As[(threadyForB * TM + resIdx) * BK + dotIdx] * tmpB;
         }
         __syncthreads();
     }
 
-    for (uint resIdx = 0; resIdx < TM; ++resIdx) {
-        C[(threadRow * TM + resIdx) * N + threadCol] = threadResults[resIdx];
-    }
+    for (uint resIdx = 0; resIdx < TM; ++resIdx)
+        C[(threadyForB * TM + resIdx) * N + threadxForB] = threadResults[resIdx];
 }
 
 void matrixMul1DBlocktiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
