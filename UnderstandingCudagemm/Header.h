@@ -162,22 +162,20 @@ __global__ void sgemm1DBlocktiling(int M, int N, int K, const float* A, const fl
     const int threadCol = threadIdx.x % BN;
     const int threadRow = threadIdx.x / BN;
 
-    __shared__ float As[BM * BK];
-    __shared__ float Bs[BK * BN];
+    __shared__ float As[512];
+    __shared__ float Bs[512];
     float threadResults[TM] = { 0.0 };
 
     assert(BM * BK == blockDim.x);
     assert(BN * BK == blockDim.x);
     const uint innerColA = threadIdx.x % BK; // warp-level GMEM coalescing
     const uint innerRowA = threadIdx.x / BK;
-    const uint innerColB = threadIdx.x % BN; // warp-level GMEM coalescing
-    const uint innerRowB = threadIdx.x / BN;
 
     float* sharedA = As + innerRowA * BK + innerColA;
-    float* sharedB = Bs + innerRowB * BN + innerColB;
+    float* sharedB = Bs + threadRow * BN + threadCol;
 
     A += innerColA + innerRowA * K + cRow * BM * K;
-    B += innerColB + innerRowB * N + cCol * BN;
+    B += threadCol + threadRow * N + cCol * BN;
     C += cRow * BM * N + cCol * BN;
 
     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK, A += BK, B += BK * N) {
