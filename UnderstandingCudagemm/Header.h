@@ -8,6 +8,7 @@
 /*
 Important lesseons
 0. asserts can help compilers optimize
+1. from the looks of it, to get better performance, you need larger blocks for more math per thread
 */
 
 void PrintGPUMatrix(float* d_arr, uint32_t rows, uint32_t cols, const char* label) {
@@ -163,8 +164,8 @@ __global__ void sgemm1DBlocktiling(int M, int N, int K, const float* A, const fl
     const uint blockedX = blockIdx.x * BN;
     const uint blockedY = blockIdx.y * BM;
 
-    __shared__ float As[512];
-    __shared__ float Bs[512];
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
     float threadResults[TM] = { 0.0 };
 
     const uint threadxForA = threadIdx.x % BK;  // 0 - 7
@@ -215,16 +216,16 @@ __global__ void sgemm1DBlocktiling2(int M, int N, int K, const float* A, const f
     __shared__ float Bs[1024];
     float threadResults[4] = { 0.0 };
 
-    const uint threadxForA = threadIdx.x & 0xf;  // 0 - 7
+    const uint threadxForA = threadIdx.x & 0xf;  // 0 - 15
     const uint threadyForA = threadIdx.x >> 4;  // 0 - 63
 
     const uint threadxForB = threadIdx.x & 0x3F;  // 0 - 63
-    const uint threadyForB = threadIdx.x >> 6;  // 0 - 7
+    const uint threadyForB = threadIdx.x >> 6;  // 0 - 15
 
     float* sharedA = As + threadIdx.x;
     float* sharedB = Bs + threadIdx.x;
 
-    // can use | instead of +
+    // can use | instead of + for threadyForA + blockedY i think
     A += threadxForA + (threadyForA + blockedY) * K;
     B += threadxForB + threadyForB * N + blockedX;
     C += (blockedY + (threadyForB << 2)) * N + blockedX + threadxForB;
@@ -251,4 +252,72 @@ __global__ void sgemm1DBlocktiling2(int M, int N, int K, const float* A, const f
 void matrixMul1DBlocktiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
 	sgemm1DBlocktiling2<<<dim3((wB >> 6) + bool(wB & 0x3f), (hA >> 6) + bool(hA & 0x3f)), 1024>>> (hA, wB, wA, A, B, C);
+}
+
+__global__ void sgemm2DBlocktiling(int M, int N, int K, const float* A, const float* B, float* C)
+{
+    const uint BM = 128;
+    const uint BN = 128;
+    const uint BK = 8;
+    const uint TM = 8;
+    const uint TN = 8;
+
+    const uint totalResultsBlocktile = BM * BN;
+    const uint numThreadsBlocktile = totalResultsBlocktile / (TM * TN);
+    assert(numThreadsBlocktile == blockDim.x);
+
+    const int threadCol = threadIdx.x % (BN / TN);
+    const int threadRow = threadIdx.x / (BN / TN);
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
+
+    A += blockIdx.y * BM * K;
+    B += blockIdx.x * BN;
+    C += blockIdx.y * BM * N + blockIdx.x * BN;
+
+    const uint Ay = threadIdx.x / BK;   // 0 - 31
+    const uint Ax = threadIdx.x % BK;   // 0 - 7
+    const uint strideA = numThreadsBlocktile / BK;  // 32
+
+    const uint By = threadIdx.x / BN;   // 0 - 1
+    const uint Bx = threadIdx.x % BN;   // 0 - 127
+    const uint strideB = numThreadsBlocktile / BN;  // 2
+
+    float threadResults[TM * TN] = { 0.0 };
+    float regM[TM] = { 0.0 };
+    float regN[TN] = { 0.0 };
+
+    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK)
+    {
+        for (uint subY = 0; subY < BM; subY += strideA)
+            As[(Ay + subY) * BK + Ax] = A[(Ay + subY) * K + Ax];
+        for (uint subX = 0; subX < BK; subX += strideB)
+            Bs[(By + subX) * BN + Bx] = B[(By + subX) * N + Bx];
+         __syncthreads();
+
+        A += BK;
+        B += BK * N;
+
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
+        {
+            for (uint i = 0; i < TM; ++i)
+                regM[i] = As[(threadRow * TM + i) * BK + dotIdx];
+            for (uint i = 0; i < TN; ++i)
+                regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM)
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN)
+                    threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+        }
+        __syncthreads();
+    }
+
+    for (uint resIdxM = 0; resIdxM < TM; ++resIdxM)
+        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN)
+            C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN] = threadResults[resIdxM * TN + resIdxN];
+}
+
+void matrixMul2DBlocktiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    sgemm2DBlocktiling <<<dim3((wB >> 7) + bool(wB & 0x7f), (hA >> 7) + bool(hA & 0x7f)), 256>>> (hA, wB, wA, A, B, C);
 }
