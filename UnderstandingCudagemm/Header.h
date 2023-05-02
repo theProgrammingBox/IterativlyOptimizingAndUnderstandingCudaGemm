@@ -266,8 +266,8 @@ __global__ void sgemm2DBlocktiling(int M, int N, int K, const float* A, const fl
     const uint numThreadsBlocktile = totalResultsBlocktile / (TM * TN);
     assert(numThreadsBlocktile == blockDim.x);
 
-    const int threadCol = threadIdx.x % (BN / TN);
-    const int threadRow = threadIdx.x / (BN / TN);
+    const int threadCol = threadIdx.x % (BN / TN);  // 0 - 15
+    const int threadRow = threadIdx.x / (BN / TN);  // 0 - 15
 
     __shared__ float As[BM * BK];
     __shared__ float Bs[BK * BN];
@@ -320,4 +320,79 @@ __global__ void sgemm2DBlocktiling(int M, int N, int K, const float* A, const fl
 void matrixMul2DBlocktiling(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
 {
     sgemm2DBlocktiling <<<dim3((wB >> 7) + bool(wB & 0x7f), (hA >> 7) + bool(hA & 0x7f)), 256>>> (hA, wB, wA, A, B, C);
+}
+
+__global__ void sgemm2DBlocktiling2(int M, int N, int K, const float* A, const float* B, float* C)
+{
+    const uint BM = 128;
+    const uint BN = 128;
+    const uint BK = 32;
+    const uint TM = 8;
+    const uint TN = 8;
+
+    const int threadCol = threadIdx.x % (BN / TN);  // 0 - 15
+    const int threadRow = threadIdx.x / (BN / TN);  // 0 - 15
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
+
+    const uint Ay = threadIdx.x / BK;   // 0 - 31
+    const uint Ax = threadIdx.x % BK;   // 0 - 7
+    const uint strideA = 256 / BK;  // 32
+
+    const uint By = threadIdx.x / BN;   // 0 - 1
+    const uint Bx = threadIdx.x % BN;   // 0 - 127
+    const uint strideB = 256 / BN;  // 2
+
+    float threadResults[TM * TN] = { 0.0 };
+    float regM[TM] = { 0.0 };
+    float regN[TN] = { 0.0 };
+
+    A += blockIdx.y * BM * K;
+    B += blockIdx.x * BN;
+    C += blockIdx.y * BM * N + blockIdx.x * BN + threadRow * TM * N + threadCol * TN;
+
+    const float* end = A + K;
+
+    float* sAloadStart = As + Ay * BK + Ax;
+    float* sBloadStart = Bs + By * BN + Bx;
+
+    const float* AloadStart = A + Ay * K + Ax;
+    const float* BloadStart = B + By * N + Bx;
+
+    const float* sACacheStart = As + threadRow * TM * BK;
+    const float* sBCacheStart = Bs + threadCol * TN;
+
+    for (; A < end; A += BK, B += BK * N)
+    {
+        for (uint subY = 0; subY < BM; subY += strideA)
+            sAloadStart[subY * BK] = AloadStart[subY * K];
+        for (uint subX = 0; subX < BK; subX += strideB)
+            sBloadStart[subX * BN] = BloadStart[subX * N];
+        __syncthreads();
+
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
+        {
+            for (uint i = 0; i < TM; ++i)
+                regM[i] = sACacheStart[i * BK + dotIdx];
+
+            for (uint i = 0; i < TN; ++i)
+                regN[i] = sBCacheStart[dotIdx * BN + i];
+
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM)
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN)
+                    threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+
+        }
+        __syncthreads();
+    }
+
+    for (uint resIdxM = 0; resIdxM < TM; ++resIdxM)
+        for (uint resIdxN = 0; resIdxN < TN; ++resIdxN)
+            C[resIdxM * N + resIdxN] = threadResults[resIdxM * TN + resIdxN];
+}
+
+void matrixMul2DBlocktiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float* A, const float* B, float* C)
+{
+    sgemm2DBlocktiling2 << <dim3((wB >> 7) + bool(wB & 0x7f), (hA >> 7) + bool(hA & 0x7f)), 256 >> > (hA, wB, wA, A, B, C);
 }
