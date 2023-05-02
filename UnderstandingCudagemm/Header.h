@@ -357,18 +357,15 @@ __global__ void sgemm2DBlocktiling2(int M, int N, int K, const float* A, const f
     float* sAloadStart = As + Ay * BK + Ax;
     float* sBloadStart = Bs + By * BN + Bx;
 
-    const float* AloadStart = A + Ay * K + Ax;
-    const float* BloadStart = B + By * N + Bx;
-
     const float* sACacheStart = As + threadRow * TM * BK;
     const float* sBCacheStart = Bs + threadCol * TN;
 
     for (; A < end; A += BK, B += BK * N)
     {
         for (uint subY = 0; subY < BM; subY += strideA)
-            sAloadStart[subY * BK] = AloadStart[subY * K];
+            sAloadStart[subY * BK] = A[(Ay + subY) * K + Ax];
         for (uint subX = 0; subX < BK; subX += strideB)
-            sBloadStart[subX * BN] = BloadStart[subX * N];
+            sBloadStart[subX * BN] = B[(By + subX) * N + Bx];
         __syncthreads();
 
         for (uint dotIdx = 0; dotIdx < BK; ++dotIdx)
