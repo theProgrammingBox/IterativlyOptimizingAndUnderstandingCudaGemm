@@ -393,3 +393,81 @@ void matrixMul2DBlocktiling2(uint32_t hA, uint32_t wA, uint32_t wB, const float*
 {
     sgemm2DBlocktiling2 << <dim3((wB >> 7) + bool(wB & 0x7f), (hA >> 7) + bool(hA & 0x7f)), 256 >> > (hA, wB, wA, A, B, C);
 }
+__global__ void sgemmVectorize(int M, int N, int K, float* A, float* B, float* C) {
+    const int BM = 128;
+    const int BN = 128;
+    const int BK = 8;
+    const int TM = 8;
+    const int TN = 8;
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
+
+    float threadResults[TM * TN] = { 0.0 };
+    float regM[TM] = { 0.0 };
+    float regN[TN] = { 0.0 };
+
+    // BN/TN are the number of threads to span a column
+    const int threadRow = threadIdx.x / (BN / TN);  // 0 - 15
+    const int threadCol = threadIdx.x % (BN / TN);  // 0 - 15
+
+    // calculating the indices that this thread will load into SMEM
+    // we'll load 128bit / 32bit = 4 elements per thread at each step
+    const uint innerRowA = threadIdx.x / (BK / 4);  // 0 - 127
+    const uint innerColA = threadIdx.x % (BK / 4);  // 0 - 1
+    // calculates the number of rows of As that are being loaded in a single step
+    // by a single block
+    const uint innerRowB = threadIdx.x / (BN / 4);  // 0 - 7
+    const uint innerColB = threadIdx.x % (BN / 4);  // 0 - 31
+    // for both As and Bs we want each load to span the full column-width, for
+    // better GMEM coalescing (as opposed to spanning full row-width and iterating
+    // across columns)
+
+    A += blockIdx.y * BM * K;
+    B += blockIdx.x * BN;
+    C += blockIdx.y * BM * N + blockIdx.x * BN;
+
+    float* AEnd = A + K;
+    for (;A < AEnd; A += BK, B += BK * N)
+    {
+        // populate the SMEM caches
+        // transpose A while loading it
+        float4 tmp = *(float4*)(A + innerRowA * K + innerColA * 4);
+        As[(innerColA * 4 + 0) * BM + innerRowA] = tmp.x;
+        As[(innerColA * 4 + 1) * BM + innerRowA] = tmp.y;
+        As[(innerColA * 4 + 2) * BM + innerRowA] = tmp.z;
+        As[(innerColA * 4 + 3) * BM + innerRowA] = tmp.w;
+
+        *(float4*)(Bs + innerRowB * BN + innerColB * 4) = *(float4*)(B + innerRowB * N + innerColB * 4);
+        __syncthreads();
+
+        // calculate per-thread results
+        for (uint dotIdx = 0; dotIdx < BK; ++dotIdx) {
+            // block into registers
+            for (uint i = 0; i < TM; ++i) {
+                regM[i] = As[dotIdx * BM + threadRow * TM + i];
+            }
+            for (uint i = 0; i < TN; ++i) {
+                regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
+            }
+            for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
+                for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
+                    threadResults[resIdxM * TN + resIdxN] += regM[resIdxM] * regN[resIdxN];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    for (uint resIdxM = 0; resIdxM < TM; resIdxM += 1)
+        for (uint resIdxN = 0; resIdxN < TN; resIdxN += 4)
+            *(float4*)(C + (threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN) =
+                *(float4*)(threadResults + resIdxM * TN + resIdxN);
+}
+
+void matrixMulVectorize(uint32_t hA, uint32_t wA, uint32_t wB, float* A, float* B, float* C)
+{
+    sgemmVectorize << <dim3((wB >> 7) + bool(wB & 0x7f), (hA >> 7) + bool(hA & 0x7f)), 256 >> > (hA, wB, wA, A, B, C);
+}
+
+// todo, 8 float load by consecutive float4 loads
